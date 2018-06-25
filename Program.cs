@@ -8,6 +8,8 @@ using System.Threading.Tasks;
 using Newtonsoft.Json;
 
 using Microsoft.ServiceBus.Messaging;
+using Microsoft.Azure.Documents;
+using Microsoft.Azure.Documents.Client;
 
 
 namespace iot_emulator
@@ -16,8 +18,16 @@ namespace iot_emulator
     {
         //Assign a name for your database 
         private static readonly string evenstHubConnection = ConfigurationManager.AppSettings["Microsoft.ServiceBus.ConnectionString"];
+        private static readonly string useCosmos = ConfigurationManager.AppSettings["UseCosmos"];
+        private static readonly string cosmosDBAccount = ConfigurationManager.AppSettings["CosmosDBAccount"];
+        private static readonly string cosmosDBKey = ConfigurationManager.AppSettings["CosmosDBKey"];
+        private static readonly string cosmosDBDatabase = ConfigurationManager.AppSettings["CosmosDBDatabase"];
+        private static readonly string cosmosDBCollection = ConfigurationManager.AppSettings["CosmosDBCollection"];
 
-        private static EventHubClient HubClient;
+        private static EventHubClient _eventHubClient;
+        private static DocumentClient _cosmosClient;
+        private static Database _cosmosDatabase;
+        private static DocumentCollection _cosmosCollection;
 
         static int _deviceCount = 12;
         static int _timeToSleep = 1000;
@@ -25,7 +35,7 @@ namespace iot_emulator
         static void Main(string[] args)
         {
             string jsonMessage;
-            HubSetup();
+            EventSinkSetup();
 
             //Build a collection of device emulators
             List<IotDevice> _devices = new List<IotDevice>();
@@ -45,9 +55,9 @@ namespace iot_emulator
                     {
                         //Get the reading object and send it to event hub.
                         IotDeviceReading reading = device.GetNextReading();
-                        jsonMessage = JsonConvert.SerializeObject(reading);
-                        Console.WriteLine(jsonMessage);
-                        HubClient.SendAsync(new EventData(Encoding.UTF8.GetBytes(jsonMessage)));
+                        SendPayload(reading);
+                        Console.WriteLine(JsonConvert.SerializeObject(reading));
+                        
                     }
                     Thread.Sleep(_timeToSleep);
                 }
@@ -55,9 +65,62 @@ namespace iot_emulator
 
         }
 
-        private static void HubSetup()
+        private static void SendPayload(IotDeviceReading reading)
         {
-            HubClient = EventHubClient.CreateFromConnectionString(evenstHubConnection);
+            string jsonMessage;
+            if (useCosmos != "true")
+            {
+                jsonMessage = JsonConvert.SerializeObject(reading);
+                _eventHubClient.SendAsync(new EventData(Encoding.UTF8.GetBytes(jsonMessage)));
+            }
+            else {
+                _cosmosClient.CreateDocumentAsync(_cosmosCollection.DocumentsLink, reading).Wait();
+            }
         }
+
+        private static void EventSinkSetup()
+        {
+            if (useCosmos != "true")
+            {
+                _eventHubClient = EventHubClient.CreateFromConnectionString(evenstHubConnection);
+            }
+            else
+            {
+                //Connect to the cosmosdb endpoint
+                _cosmosClient = new DocumentClient(new Uri(cosmosDBAccount), cosmosDBKey);
+
+                //Run a linq query to see if the database exists
+                var query = _cosmosClient.CreateDatabaseQuery()
+                    .Where(db => db.Id == cosmosDBDatabase);
+
+                //if the linq query returns nothing create the database
+                var databases = query.ToArray();
+                if (databases.Any())
+                {
+                    _cosmosDatabase = databases.First();
+                }
+                else
+                {
+                    _cosmosDatabase = _cosmosClient.CreateDatabaseAsync(new Database { Id = cosmosDBDatabase }).Result;
+                }
+
+                //Run a linq query to see if the collection exists
+                var collections = _cosmosClient.CreateDocumentCollectionQuery(_cosmosDatabase.SelfLink)
+                     .Where(col => col.Id == cosmosDBCollection).ToArray();
+
+                //If the linq query returns nothing create the collection
+                if (collections.Any())
+                {
+                    _cosmosCollection = collections.First();
+                }
+                else
+                {
+                    DocumentCollection c = new DocumentCollection { Id = cosmosDBCollection };
+                    _cosmosCollection = _cosmosClient.CreateDocumentCollectionAsync(_cosmosDatabase.SelfLink, c).Result;
+                }
+
+            }
+        }
+        
     }
 }
